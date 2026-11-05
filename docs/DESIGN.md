@@ -373,7 +373,7 @@ hexes)**, profile, then scale up.
 3. **M2 Expansion**: OpenFront-style claiming of neutral land with troops, multiple
    factions, simple aggregate combat.
 4. **M3 Races + AI**: Human/Elf/Orc definitions, utility AI.
-5. **M4 Economy**: resources, buildings, transport delay.
+5. **M4 Economy**: resources, buildings, roads + wagon entities, dispatcher, policy levers.
 6. **M5 Tech + Gear**: research, ages, armories, gear tiers on cohorts.
 7. **M6 The General**: armies, cohorts, front lines, supply, orders UI.
 8. **M7 Heroes**: traits, promotion/demotion, battle zoom with cosmetic crowds, chronicle log.
