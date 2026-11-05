@@ -82,11 +82,37 @@ Time: real time with **pause and speed controls** (1×/2×/4×). A match lasts a
 ### 2.2 Geography (the foundation)
 Map generation goes: heightmap → temperature (latitude + altitude) → moisture → rivers → **biome**.
 
-Tiles are **hexes** (axial coordinates, Red Blob Games hex guide). Each hex has:
-- `elevation`, `biome`, `river`/`coast` flags
-- **`fertility`** (0–1) from biome × moisture × river/coast bonus
-- **resource deposit** (optional): iron, stone, gold, timber (forest), horses (grassland), fish (coast)
-- `development` (0–1), which builds up with population and buildings
+Tiles are **pointy-top hexes** (axial math, odd-r offset storage; Red Blob Games hex guide).
+
+**Tile types** (implemented in M0, `src/sim/terrain.ts`):
+
+| Type | Water | Notes |
+|---|---|---|
+| Ocean | **salt** | sea ships only |
+| Lake | **fresh** | irrigates its neighbours; river barges |
+| River | **fresh** | full water hexes, for now drawn like lakes (prettier later) |
+| Canal | **fresh** | **built** on land next to fresh water. It irrigates dry neighbours, so a desert becomes farmable, and it extends river navigation. |
+| Grassland | — | fertile; can carry **forest cover** |
+| Desert | — | fertility ≈ 0, or 0.55 when next to fresh water ("irrigated") |
+| Foothills | — | middling fertility; copper and iron |
+| Mountain | — | no farming; iron, copper, gold; impassable to wagons |
+
+Each hex stores:
+- `terrain`
+- `ground` (the land under a canal)
+- `elevation`, `moisture`
+- **`fertility`** (0–1): soil quality plus a fresh-water bonus. Salt water gives no bonus.
+- `forest` density (0–3)
+- mineral `deposit`
+- later, `development`
+
+**Forest** is per-hex *cover* drawn as a tree overlay, **not entities**. With tens of
+thousands of forested hexes, trees as entities would cost a lot and add nothing. Individual
+trees can appear later as cosmetic sprites, the same way crowds do (§3.3).
+
+**Resources** (top bar, in this order): **wood** (forest cover), **gold**, **copper**,
+**iron** (deposits), and **food** (fertile land). Every amount is measured in **CU (cargo
+units)**, the same unit as vehicle capacity.
 
 **Carrying capacity** for a region is `K = Σ fertility × tileArea × techMult × buildingMult × raceBiomeMult`.
 
@@ -160,6 +186,33 @@ class Vehicle     { type: VehicleType; edge; progress; cargo; orders; } // insta
 
 Classes fit here well. Vehicles number in the **thousands to tens of thousands**, and the
 benchmark in §3.6 shows class instances are as fast as raw arrays at that scale.
+
+### 2.4c Seafaring (very important)
+- **Water hexes have a water kind: `fresh` or `salt`.** It decides fertility (only fresh
+  water irrigates) and navigation (which boat types may enter).
+- **All vehicles share one base**: `health`, `maxHealth`, and `cargoCapacity` in **CU**.
+  Damage slows a vehicle, down to a minimum of half speed. Wagons, boats, and later trains
+  are subclasses that only decide *where* they can go. Implemented in `src/sim/vehicles.ts`:
+
+| Vehicle | Water | Health | Capacity (CU) | Speed (hex/s) |
+|---|---|---|---|---|
+| River barge | fresh (rivers, lakes, canals) | 40 | 20 | 1.2 |
+| Cog | salt (ocean) | 100 | 100 | 2.0 |
+| Wagon | land (not mountains) | 30 | 10 | 1.0 |
+
+- **Boats pathfind** with A* over hexes they are allowed to enter. Water is split into
+  **connected bodies** (fresh and salt are kept separate), so an unreachable destination is
+  rejected without searching. Digging a canal can merge fresh bodies and open new routes.
+- **Ports** (M4) are where the two networks meet: barges hand cargo to cogs at a river
+  mouth, and wagons load at docks.
+- **Trade routes** are gated by the **trade lever**. When trade is on, the dispatcher
+  pairs ports that have a complementary surplus and deficit, and creates *recurring*
+  shipments. The path of a recurring shipment is cached as a **trade route**, which
+  becomes an object on the map that is shown, gets busier with traffic, earns gold, and can
+  be raided or blockaded. Routes are recomputed only when the map changes (new canal,
+  blockade), not every trip. This is also what keeps long sea paths cheap (§3.6).
+- Later ideas: fishing (food from coastal salt hexes), naval combat on the same
+  health/cohort model, and sea supply for armies.
 
 ### 2.5 Technology and gear
 - Research points come from `population × literacy(buildings) × raceResearchMult`.
@@ -293,10 +346,17 @@ This is the trick that keeps WorldBox flavor at OpenFront scale:
   large territory maps, and a browser game is easy to share.
 - **Sim in a Web Worker** using typed arrays. Use bitECS or a small hand-rolled ECS
   (entity counts are modest because of the LOD design).
-- **PixiJS / raw WebGL2** for rendering. Hex state lives in a **data texture** (1 texel = 1 hex)
-  that we update by dirty rows. A fragment shader converts each pixel → axial hex (hex
-  rounding) → samples the texture, and draws owner colour, borders, and overlays. This
-  costs the same at any map size, with no per-hex geometry.
+- **Rendering: Canvas 2D first, which needs no GPU** (implemented). The map is cut into
+  16×16-hex chunks. Each chunk is drawn once into an offscreen canvas and redrawn only when
+  one of its hexes changes, so a frame is a few dozen image copies. Zoomed far out, a
+  one-colour-per-hex overview image replaces the chunks. Browsers rasterise Canvas 2D on the
+  CPU when there is no GPU and accelerate it when there is.
+  - *Optional later*: a WebGL2 backend behind the same interface. Hex state would sit in a
+    data texture and a fragment shader would draw it. It would only be used when
+    `getContext('webgl2')` succeeds, otherwise the game falls back to Canvas 2D.
+  - Chrome has deprecated its automatic software-WebGL (SwiftShader) fallback (from Chrome
+    130). On machines without a usable GPU, WebGL can simply fail, so a Canvas 2D path is
+    required.
 - **Plain DOM / Preact** for UI panels.
 - **Vitest** for sim tests, plus determinism tests (run twice, hash state, compare).
 - The alternative, **Godot**, gives better tooling for sprites and animation but makes web
@@ -368,7 +428,16 @@ player's ability to read the map are the practical limits. Start at **512×256 (
 hexes)**, profile, then scale up.
 
 ### 3.7 Milestones
-1. **M0 World**: map gen (height/temp/moisture/biome/rivers), regions, render + overlays.
+1. **M0 World**: map gen, render, and overlays. **First slice done**:
+   - hex map gen with all tile types and fresh/salt water
+   - canals (a build command that irrigates)
+   - fertility overlay
+   - deposits, forest overlay
+   - resource top bar
+   - sprite sheet (peoples, tiles, vehicles)
+   - boats pathfinding in the sim worker
+
+   Still to do in M0: regions, and temperature/latitude biomes.
 2. **M1 Life**: one faction, settlements, logistic growth, the pop/s UI with breakdown tooltip.
 3. **M2 Expansion**: OpenFront-style claiming of neutral land with troops, multiple
    factions, simple aggregate combat.
@@ -386,6 +455,10 @@ hexes)**, profile, then scale up.
 | Player powers | **Paramount leader**: governs mainly by economic policy. Direct actions cost political capital. |
 | Overland transport | **Roads + wagon entities**, using a network/vehicle class scaffold that railroads reuse later |
 | Platform | **Browser only.** TypeScript first, with kernels ready for a Wasm port. |
-| Map size | TBD by profiling. Start at 512×256. |
+| Map size | TBD by profiling. Start at 512×256 (the current default is 192×128 while the art is reviewed). |
+| Rendering | **Canvas 2D (works without a GPU)**. WebGL is an optional later backend. |
+| Water | Hexes are **fresh or salt**. Rivers and lakes are fresh water hexes. **Canals** are built fresh water that irrigates. |
+| Vehicles | One base with **health + cargo capacity (CU)**. Boats pathfind. Trade routes form when the trade lever is on. |
+| Order of work | **Core systems before politics.** Political capital and stability come after the core loop. |
 
-Still open: how political capital is earned, how stability works, and the scope of naval transport.
+Still open: how political capital is earned, and how stability works (deferred until after the core loop).
